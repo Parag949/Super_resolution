@@ -64,3 +64,31 @@ The enhanced imagery must demonstrate measurable performance gains over native 1
 * **Automated Land Cover Classification:** Higher overall accuracy and Kappa coefficient.
 * **Building & Road Extraction:** Improved IoU (Intersection over Union) on fine infrastructure.
 * **Change Detection:** Reduction in false positives along high-contrast boundaries.
+
+## Acknowledgements & Citations
+
+This project utilizes the **WorldStrat Dataset** for training and validating cross-sensor super-resolution mappings between Sentinel-2 and high-resolution Airbus SPOT imagery.
+
+If you use this work or benchmark, please cite the original WorldStrat creators:
+
+```bibtex
+@misc{cornebise_open_2022,
+  title = {Open High-Resolution Satellite Imagery: The WorldStrat Dataset -- With Application to Super-Resolution},
+  author = {Cornebise, Julien and Or{\v s}oli{\'c}, Ivan and Kalaitzis, Freddie},
+  year = {2022},
+  month = jul,
+  number = {arXiv:2207.06418},
+  eprint = {2207.06418},
+  eprinttype = {arxiv},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2207.06418}
+}
+
+@article{cornebise_worldstrat_zenodo_2022,
+  title = {The WorldStrat Dataset},
+  author = {Cornebise, Julien and Orsolic, Ivan and Kalaitzis, Freddie},
+  year = {2022},
+  month = jul,
+  journal = {Dataset on Zenodo},
+  doi = {10.5281/zenodo.6810792}
+}
