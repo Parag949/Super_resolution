@@ -1,15 +1,66 @@
-Problem Statement Title	
-Deep Learning Based Super Resolution Mapping (SRM) from Medium Resolution Satellite Imageries
-Description	
-• Background Medium-resolution satellite imagery, typically ranging from 10 to 30 meters, is widely used in change detection, agriculture, land-cover mapping, disaster monitoring, and urban planning because it offers broad coverage and frequent revisit time. However, the spatial detail is often insufficient for fine-scale analysis, such as identifying small buildings, narrow roads, field boundaries, or localized damage assessment. This creates a need for advanced deep learning based generative enhancement techniques that can extract greater value from existing Earth observation data.
-• Description Medium-resolution satellite imagery, usually ranging from 10 to 30 meters, is widely used in remote sensing for agriculture monitoring, land-cover mapping, urban planning, disaster assessment, and environmental observation because it provides large-area coverage and frequent revisit capability. However, its spatial resolution is often not sufficient to clearly identify fine details such as narrow roads, small buildings, field boundaries, water edges, or localized damage. This limitation reduces the accuracy and confidence of interpretation and decision-making in applications that require detailed ground-level information. Generative AI super-resolution addresses this problem by using advanced models such as GANs, diffusion models, and deep neural networks to enhance medium-resolution satellite images into sharper and more information-rich finer outputs. These models learn spatial textures, patterns, edges, and spectral relationships from training data containing both medium-resolution and high-resolution image pairs. The goal is not simply to make the image visually clearer, but to reconstruct useful fine-scale details while preserving the original geographic and spectral consistency of the satellite data.
+# Project Requirements Specification
 
-The expected solution is a robust AI-based super-resolution framework that can take medium-resolution satellite imagery as input, perform pre-processing, apply a trained generative model, and produce an enhanced spatial resolution image, suitable for analysis. The system should improve feature visibility, support better classification, change detection, crop monitoring, urban mapping, and disaster response. At the same time, it must clearly manage uncertainty because some reconstructed details are inferred by the model and not directly observed. Therefore, validation against high-resolution reference data is essential to ensure that the enhanced outputs are scientifically reliable and useful for real-world remote sensing applications.
+## Deep Learning Based Super Resolution Mapping (SRM) from Medium Resolution Satellite Imageries
 
-• Expected Solution The expected solution is a robust super-resolution framework model based on the choice of participating team (Transformers/Generative/CNN etc.) that can transform the input medium-resolution satellite imagery (10m Sentinel-2 Satellite Imagery) into sharper, information-rich products (<4m) while preserving geospatial and spectral consistency. The solution should include pre-processing, model training with paired datasets, accuracy assessment, and validation against high-resolution references. Ideally, it should support applications such as crop monitoring, urban analysis, and disaster assessment. The final outcome should improve in-terms of interpretability and analytical utility, while clearly accounting for uncertainty and error components.
+---
 
+### 1. Executive Summary
+Development of an end-to-end deep learning framework designed to ingest medium-resolution satellite imagery (Sentinel-2 at 10m Ground Sample Distance) and reconstruct high-resolution outputs (<4m GSD). The solution must guarantee radiometric, spectral, and geospatial fidelity to serve downstream remote sensing analytics and decision-support systems.
 
+---
 
+### 2. Core Functional Requirements
 
-Youtube Link	https://www.youtube.com/watch?v=cQoHSStTEdM
-Dataset Link	https://browser.dataspace.copernicus.eu
+#### 2.1 Data Ingestion & Pre-Processing
+* **Input Specifications:** Multi-band Sentinel-2 imagery (native 10m spatial resolution across VNIR bands).
+* **Ground-Truth Paired Datasets:** Construction of geographically aligned pairs of low-resolution (LR, 10m) inputs and high-resolution (HR, sub-4m) reference data (e.g., PlanetScope, SPOT, or aerial orthophotos).
+* **Data Cleansing & Normalization:**
+  * Cloud, cloud-shadow, and atmospheric artifact masking.
+  * Orthorectification and sub-pixel spatial coregistration.
+  * Band-wise normalization preserving physical surface reflectance units.
+
+#### 2.2 Model Architecture & Training Framework
+* **Deep Learning Paradigms:** Implementation and tuning of generative or deep feature-extraction models:
+  * Generative Adversarial Networks (e.g., ESRGAN, Real-ESRGAN).
+  * Denoising Diffusion Probabilistic Models (DDPMs / SR3).
+  * Vision Transformers (e.g., SwinIR, HAT) or CNN-Transformer hybrid networks.
+* **Target Scale Factor:** Minimum 2.5x to 4x super-resolution scaling (10m $\rightarrow$ <4m).
+* **Multi-Objective Loss Formulation:**
+  * Pixel-level reconstruction loss ($L_1$ or Charbonnier loss).
+  * Edge/gradient consistency loss for structural sharpening.
+  * Perceptual loss (VGG or remote-sensing foundation model embeddings).
+  * Dedicated spectral angle and radiometric preservation penalties.
+
+#### 2.3 Scientific Integrity & Uncertainty Quantification
+* **Spectral Fidelity:** Prevention of hallucinated spectral shifts; output bands must yield mathematically consistent radiometric indices (e.g., NDVI, NDWI, EVI).
+* **Geospatial Rigor:** Full retention of spatial reference systems (CRS/EPSG codes), bounding boxes, affine transformation matrices, and GeoTIFF metadata.
+* **Uncertainty Mapping:** Generation of pixel-level confidence/variance masks to distinguish verified observed structures from generative inferences.
+
+---
+
+### 3. Evaluation & Validation Framework
+
+#### 3.1 Quantitative Metrics
+
+| Evaluation Dimension | Metric | Objective |
+| :--- | :--- | :--- |
+| **Pixel Reconstruction** | Peak Signal-to-Noise Ratio (PSNR) | Minimize mean squared error across bands |
+| **Structural Fidelity** | Structural Similarity Index (SSIM) | Maximize luminance, contrast, and structural alignment |
+| **Perceptual Realism** | Learned Perceptual Patch Similarity (LPIPS) | Preserve realistic ground textures without blurring |
+| **Spectral Integrity** | Spectral Angle Mapper (SAM) | Minimize spectral vector distortion across all bands |
+| **Synthesis Error** | ERGAS | Minimize overall synthesis error relative to mean radiance |
+
+#### 3.2 Qualitative & Cross-Terrain Validation
+* Validation across heterogeneous land-use/land-cover (LULC) typologies:
+  * Dense urban fabrics (small building footprints, alleys, road networks).
+  * Precision agriculture (cadastral field parcels, irrigation channels).
+  * Natural resources (riparian boundaries, water edges, forest corridors).
+  * Disaster zones (localized flood boundaries, infrastructure damage).
+
+---
+
+### 4. Downstream Analytical Utility
+The enhanced imagery must demonstrate measurable performance gains over native 10m Sentinel-2 inputs in:
+* **Automated Land Cover Classification:** Higher overall accuracy and Kappa coefficient.
+* **Building & Road Extraction:** Improved IoU (Intersection over Union) on fine infrastructure.
+* **Change Detection:** Reduction in false positives along high-contrast boundaries.
