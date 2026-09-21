@@ -1,4 +1,4 @@
-## Currently developing this Phase 1 feature locally. A commit will be pushed upon its complete implementationmit
+## Currently developing this Phase 1 feature locally. A commit will be pushed upon its complete implementation
 # Project Requirements Specification
 
 ## Deep Learning Based Super Resolution Mapping (SRM) from Medium Resolution Satellite Imageries
