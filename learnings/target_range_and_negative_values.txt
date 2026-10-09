@@ -1,0 +1,144 @@
+Why Satellite Datasets Can Contain Negative Values & How Target Ranges Are Decided
+========================================================================================
+
+Question:
+"Light intensity has a physical floor (pure black = 0) and max brightness (1.0).
+You cannot have negative light, so Target must be [0, 1].
+But doesn't the raw satellite dataset contain negative values? Why?"
+
+
+1. Why Do Raw Satellite Datasets Have Negative Values?
+----------------------------------------------------------------------------------------
+In physical reality, photons cannot be negative (you cannot have "negative light").
+However, in scientific Earth Observation satellite data (like Sentinel-2 L2A in this 
+project), negative values DO appear. Here are the 4 real-world reasons:
+
+A. Atmospheric Correction (Overcorrection):
+   Satellites fly in outer space and measure Top-of-Atmosphere (TOA) radiance.
+   The atmosphere contains dust, clouds, aerosols, and air molecules that scatter light
+   (haze/blue tint).
+   
+   To get surface reflectance (Bottom-of-Atmosphere / L2A), algorithms like Sen2Cor 
+   estimate and SUBTRACT the atmospheric haze:
+   
+       Surface Reflectance = Measured Radiance - Estimated Atmospheric Haze
+
+   Over very dark targets (clear deep ocean water, dense dark forests, or shadows cast
+   by mountains/buildings), surface reflectance is nearly 0. If the atmospheric model 
+   slightly overestimates the haze, subtracting it drives the value below zero 
+   (e.g., -0.005 or -50).
+
+B. ESA Radiometric Offset (-1000 DN):
+   In European Space Agency (ESA) Sentinel-2 processing baseline 04.00+, an additive
+   offset of -1000 is intentionally introduced so that negative surface reflectance
+   caused by atmospheric correction is not clipped or lost as underflow.
+
+C. Sensor Electronic & Thermal Noise:
+   Near the zero-light threshold (pitch-black pixels or total shadow), detector noise
+   and calibration drift can produce readings slightly below zero.
+
+D. NoData / Masking Sentinel Values:
+   Pixels outside the satellite orbit path or masked invalid areas often use sentinel 
+   values like -9999 or -32768 to distinguish "no data" from valid black pixels (0).
+
+
+2. Why Does the Codebase Enforce [0.0, 1.0] on the Target (HR SPOT)?
+----------------------------------------------------------------------------------------
+Because raw data can have these negative artifacts, the pipeline explicitly sanitizes
+the ground truth in src/datasets.py / testing.ipynb:
+
+```python
+transforms["hr"] = Compose([
+    # Step 1: Divide by sensor maximum (10,000 for 12-bit, 255 for 8-bit)
+    Lambda(lambda hr_revisit: hr_revisit.float() / maximum_expected_hr_value),
+    
+    # Step 2: Resize to target spatial resolution
+    Resize(size=output_size, interpolation=interpolation, antialias=True),
+    
+    # Step 3: Clamp explicitly to [0, 1]!
+    Lambda(lambda high_res_revisit: high_res_revisit.clamp(min=0, max=1)),
+])
+```
+
+Why .clamp(min=0, max=1) is critical:
+* It cuts off any negative artifacts (clamps everything < 0 to 0.0).
+* It cuts off any over-saturated sensor glare (clamps everything > 1 to 1.0).
+* It guarantees that the ground truth target is a physically valid, clean image 
+  ready for loss computation and visualization.
+
+
+3. Input (LR) vs. Target (HR): Why Are Negative Values Kept for Inputs?
+----------------------------------------------------------------------------------------
+* Model Input (LR Sentinel-2):
+  - Normalized with per-band Z-score: (x - mean) / std
+  - Result: Centered around 0 (values typically range between -2.5 and +2.5).
+  - Neural network convolutional kernels multiply weights and inputs (w * x + b).
+    Convolutions have no problem with negative numbers—in fact, zero-centered inputs 
+    make gradient descent converge faster!
+
+* Model Target (HR SPOT):
+  - Normalized with Max-Scaling + Clamping to [0.0, 1.0].
+  - The model's super-resolved output must be displayed on screens, evaluated with 
+    PSNR/SSIM, and saved as a GeoTIFF. It must not contain negative light.
+
+
+4. Summary Chain: Who Dictates What?
+----------------------------------------------------------------------------------------
+1. The Real-World Task:
+   Super-resolution reconstructs an optical satellite image.
+   Optical reflectance belongs in [0.0, 1.0].
+
+2. The Ground Truth Pipeline:
+   Raw sensor values are scaled by max dynamic range (10,000) and clamped with 
+   .clamp(min=0, max=1) to eliminate sensor/atmospheric negative noise.
+
+3. The Model's Final Layer:
+   The network uses Sigmoid() or clamp(0, 1) so it physically cannot predict 
+   impossible values (< 0 or > 1).
+
+4. The Loss Function:
+   L1 Loss (|prediction - target|) or SSIM Loss compares prediction against target 
+   on the exact same [0.0, 1.0] scale, allowing the loss to converge to 0.
+
+
+5. Is It Compulsory to Have the Same Reflectance Range for Input and Target?
+----------------------------------------------------------------------------------------
+Short Answer:
+Technically / mathematically? No (a neural network can learn to scale by a constant).
+Practically for Super-Resolution? YES, it is virtually compulsory.
+
+The 4 Critical Reasons:
+
+A. Residual Learning & Skip Connections (The Biggest Reason):
+   Almost every modern Super-Resolution architecture (EDSR, RCAN, ESRGAN, HighRes-net, 
+   SwinIR) uses Global Residual Learning:
+
+       Output = Bicubic_Upsampled(Input) + Residual_CNN(Input)
+
+   The neural network does not redraw the entire image from scratch. It takes the 
+   low-resolution input and only learns missing sharp edges and fine textures.
+   If input and target are on different reflectance ranges, this addition breaks: 
+   the network wastes its capacity trying to re-scale the overall brightness rather 
+   than sharpening spatial resolution.
+
+B. Radiometric Fidelity (Downstream Scientific Use):
+   Satellite images are scientific measurement data used to calculate vegetation and 
+   water indices (e.g., NDVI = (NIR - Red) / (NIR + Red)).
+   If reflectance ranges are mismatched, the model outputs radiometrically distorted 
+   colors, invalidating downstream climate and agricultural analysis.
+
+C. Cross-Sensor Spectral Alignment:
+   Sentinel-2 (10m–60m) and SPOT (1.5m) are two different sensors. SentinelHub 
+   calibrated both to the exact same physical reflectance scale (0.0 to 1.0). 
+   Keeping them aligned ensures the network learns spatial super-resolution 
+   rather than cross-sensor radiometric recalibration.
+
+D. Loss Functions & Evaluation Metrics (PSNR & SSIM):
+   Standard metrics assume an aligned dynamic range:
+
+       PSNR = 10 * log10(MAX^2 / MSE)
+
+   If target reflectance is scaled to 1.0 but the model was trained on an input scale 
+   of 100.0, MSE will be artificially massive and PSNR will plummet to useless 
+   negative numbers.
+

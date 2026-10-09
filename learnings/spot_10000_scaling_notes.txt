@@ -1,0 +1,84 @@
+Why the Codebase Divides by 10,000 (SPOT_MAX_EXPECTED_VALUE_12_BIT = 10000)
+=============================================================================
+
+In both the code and the remote sensing standard used by the WorldStrat paper, 
+HR target normalization refers to dividing by 10,000 
+(SPOT_MAX_EXPECTED_VALUE_12_BIT = 10000).
+
+Here is the exact reason why this division is used in the code and paper, and 
+why dividing by 1,000 or 4,095 is a common mistake.
+
+
+1. The SentinelHub & ESA Quantification Scale (The Primary Reason)
+-----------------------------------------------------------------------------
+The WorldStrat paper states that high-resolution Airbus SPOT images were:
+    "downloaded through and processed by SentinelHub"
+
+In satellite Earth Observation, SentinelHub processes and delivers both 
+Copernicus Sentinel-2 and commercial Airbus SPOT data as integer Digital 
+Numbers (DN) scaled by a fixed quantification factor of 10,000:
+
+    Physical Surface Reflectance (in [0.0, 1.0]) = Digital Number (DN) / 10,000
+
+* A physical reflectance of 0.20 (20% reflectance, e.g., vegetation/soil) is 
+  stored in the GeoTIFF as integer 2000.
+* A physical reflectance of 1.00 (100% white surface reflectance) is stored 
+  as integer 10000.
+* Values above 10000 only occur during extreme specular glints, solar glare, 
+  or blinding cloud tops.
+
+By dividing by 10,000, the high-resolution SPOT target values are converted 
+back into true physical surface reflectance in the [0.0, 1.0] float range.
+
+
+2. Why Not Divide by 4,095 (2^12 - 1)?
+-----------------------------------------------------------------------------
+Raw 12-bit sensor analog-to-digital converters (ADCs) output raw digital numbers 
+between 0 and 4095.
+
+However, because the WorldStrat team downloaded the SPOT data through SentinelHub's 
+API, SentinelHub had already applied radiometric calibration and scaled the 
+reflectance values to match the Sentinel-2 scale (0 to 10,000).
+
+Therefore:
+* Dividing by 4,095 would incorrectly overscale the data.
+* Dividing by 10,000 aligns the HR target with the exact same physical 
+  reflectance scale as the LR Sentinel-2 input.
+
+
+3. How It Appears in the Code
+-----------------------------------------------------------------------------
+In src/datasources.py:
+```python
+SPOT_MAX_EXPECTED_VALUE_8_BIT = 255
+SPOT_MAX_EXPECTED_VALUE_12_BIT = 10000  # The 10,000 scaling constant
+```
+
+In src/datasets.py (and src/utils/convert_to_8bit_radiometry.py):
+```python
+transforms["hr"] = Compose([
+    Lambda(lambda hr_revisit: torch.as_tensor(hr_revisit.astype(np.int32)) / maximum_expected_hr_value),
+    Resize(size=output_size, interpolation=interpolation, antialias=True),
+    Lambda(lambda high_res_revisit: high_res_revisit.clamp(min=0, max=1)),
+])
+```
+
+Notice:
+1. It divides by maximum_expected_hr_value (10,000).
+2. It immediately calls .clamp(min=0, max=1) to clip any saturated outliers 
+   or glare back to [0.0, 1.0].
+
+
+4. Critical Warning: Dividing by 1,000 vs. 10,000
+-----------------------------------------------------------------------------
+If you encounter or write / 1000 (three zeros) instead of / 10000 (four zeros):
+
+* Typical ground reflectance values are between 1,500 and 3,500.
+* If you divide by 1,000, those values become 1.5 to 3.5.
+* The following .clamp(min=0, max=1) will clip almost the entire image to 1.0, 
+  turning your ground-truth images into pure blown-out white squares and 
+  ruining model training!
+
+Rule of Thumb:
+* Always divide by 10,000.0 for Sentinel-2 / SentinelHub SPOT 12-bit data.
+* Divide by 255.0 only if you are working with pre-converted 8-bit images.

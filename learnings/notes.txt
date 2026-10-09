@@ -1,0 +1,7 @@
+for each step we should now the tensor/array shape required at each step(as 
+diffrent stages requre diff. shape or value range or values so tranformaions are done)
+its output
+and its values
+and its values range and significance
+
+as each will influcence the model failure in background

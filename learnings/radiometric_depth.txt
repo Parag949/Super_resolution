@@ -1,0 +1,110 @@
+Radiometric Depth in Satellite Remote Sensing & WorldStrat
+============================================================
+
+In satellite remote sensing and in this codebase, radiometric depth (also called 
+radiometric resolution or bit depth) refers to the number of bits used to represent 
+the brightness/intensity level of each pixel in each spectral band.
+
+It determines the sensor's sensitivity to subtle differences in light and defines 
+the dynamic range of the imagery.
+
+
+1. The Core Comparison: 8-Bit vs. 12-Bit
+------------------------------------------------------------------------------------------------------------------------
+Characteristic          Standard Digital Images (8-bit)                 Satellite Imagery in WorldStrat (12-bit)
+------------------------------------------------------------------------------------------------------------------------
+Formula                 2^8 = 256 discrete levels                       2^12 = 4096 discrete levels (scaled to 10,000 in SentinelHub)
+Integer Range           0 (pure black) to 255 (pure white)              0 to 4095 (or reflectance factor 0 to 10,000)
+Data Type in Memory     uint8 (1 byte per pixel per band)               uint16 / int32 (2–4 bytes per pixel per band)
+Use Case                Standard JPEGs, PNGs, computer screens,         Scientific Earth Observation (Sentinel-2, 
+                        consumer phone cameras                          Airbus SPOT 6/7)
+------------------------------------------------------------------------------------------------------------------------
+
+
+2. Why Does Satellite Imagery Use 12-Bit Instead of 8-Bit?
+------------------------------------------------------------------------------------------------------------------------
+Earth observation satellites look at the entire planet in a single orbit—from dazzling 
+white arctic ice caps, bright desert sands, and cloud tops to deep dark ocean trenches 
+and dense rainforest canopies.
+
+* Prevents Saturation (Blown-Out Whites):
+  In standard 8-bit photography, a bright concrete building, a metal roof, or a thin 
+  cloud immediately hits 255 (white saturation), losing all texture inside it. A 12-bit 
+  sensor has 16x more discrete levels (4096 steps), preserving fine textures inside 
+  bright regions.
+
+* Preserves Dark Shadow Details:
+  In 8-bit, deep forest canopy shadows collapse to pure black (0). In 12-bit, shadow 
+  areas retain subtle reflectance signals that machine learning models can detect.
+
+* Physical Scientific Reflectance:
+  Satellite pixels are physical radiation measurements (Top-of-Atmosphere or 
+  Bottom-of-Atmosphere reflectance). 12-bit precision ensures scientific fidelity 
+  when calculating indices like NDVI (vegetation health) or moisture indices.
+
+
+3. How It Is Handled in This Codebase
+------------------------------------------------------------------------------------------------------------------------
+In WorldStrat, the raw ground-truth images (Airbus SPOT HR) and input images 
+(Sentinel-2 LR) come natively in 12-bit radiometry.
+
+Here is how the codebase manages it:
+
+A. The CLI Flag: --radiometry_depth
+In src/train.py:
+```python
+parser.add_argument(
+    "--radiometry_depth",
+    default=12,
+    type=int,
+    help="Radiometry depth to use: 12 or 8 bits. Default: 12 (full)."
+)
+```
+
+B. Normalization During Data Loading
+Deep neural networks cannot train stably on raw integers in the range [0, 10000] 
+(loss values like (10000)^2 = 10^8 would cause gradient explosions).
+
+In src/datasources.py:
+```python
+SPOT_MAX_EXPECTED_VALUE_8_BIT = 255
+SPOT_MAX_EXPECTED_VALUE_12_BIT = 10000  # SentinelHub scaled integer representation
+```
+
+In src/datasets.py, the images are normalized into [0.0, 1.0] based on the chosen 
+radiometry depth:
+```python
+transforms["hr"] = Compose([
+    Lambda(lambda hr_revisit: torch.as_tensor(hr_revisit.astype(np.int32)) / maximum_expected_hr_value),
+    Resize(size=output_size, interpolation=interpolation, antialias=True),
+    Lambda(lambda high_res_revisit: high_res_revisit.clamp(min=0, max=1)),
+])
+```
+
+C. The Conversion Utility: convert_to_8bit_radiometry.py
+The repository provides a script to convert 12-bit GeoTIFFs into 8-bit images:
+
+Why?
+- Storage & RAM: 8-bit data halves the dataset size and memory usage during training.
+- Fast Visualization: Standard image viewers and browser frontends can display 8-bit 
+  RGB directly, but fail or display black boxes when opening raw 12-bit or 16-bit TIFF 
+  files without contrast stretching.
+
+
+4. What This Means for Your Portfolio Project & Technical Interviews
+------------------------------------------------------------------------------------------------------------------------
+If you build an end-to-end applied system (FastAPI backend + Interactive UI), radiometric 
+depth is a prime technical interview topic:
+
+* In the Web UI (Frontend):
+  Standard browser <canvas> or <img> tags only understand 8-bit (0–255). If you send 
+  raw 12-bit sensor data (0–4095 or 0–10000) to the browser, the image will appear black 
+  or corrupt. Your FastAPI backend must apply percentile clipping (e.g., 2nd to 98th 
+  percentile stretch) or scale to [0, 255] before encoding to PNG/JPEG for display.
+
+* In Model Training:
+  Explain that:
+  "I handled 12-bit raw satellite radiometry by normalizing pixel reflectances to a 
+  float range of [0.0, 1.0] using the sensor's maximum expected dynamic range (10,000 
+  for SentinelHub SPOT), preventing gradient explosion while preserving the rich 
+  radiometric sensitivity of the multispectral sensors."
