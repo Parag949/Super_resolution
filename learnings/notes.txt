@@ -5,3 +5,379 @@ and its values
 and its values range and significance
 
 as each will influcence the model failure in background
+
+
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+         PHASE 0 (COMPLETED IN testing.ipynb): Dataset Instantiation & Multi-View EDA
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+  • Root: `dataset_root = 'archive_1/'`
+  • Transforms: `transforms = make_transforms_JIF(lr_bands_to_use='true_color', radiometry_depth=12)`
+  • Your Object: `dataset = DictDataset(lr=lr, lrc=lrc, hr=hr_rgb, hr_pan=..., hr_pansharpened=...)`
+  • Verified: `t = dataset[18]` -> `t['lr'].shape == (8, 3, 160, 160)`
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                PHASE 1: PILLAR 1 — CUSTOM TRAINING PIPELINE                             │
+│                                           (Next in testing.ipynb)                                       │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                         │
+│  [Step 1: Create PyTorch DataLoader & Inspect Batch]                                                    │
+│   train_loader = DataLoader(dataset, batch_size=2, shuffle=True, num_workers=0)                        │
+│   batch = next(iter(train_loader))                                                                      │
+│   ┌───────────────────────┬──────────────────────┬─────────────┬─────────────────────────────────────┐  │
+│   │ Key                   │ Tensor Shape         │ Dtype       │ Value Range                         │  │
+│   ├───────────────────────┼──────────────────────┼─────────────┼─────────────────────────────────────┤  │
+│   │ batch['lr']           │ (2, 8, 3, 160, 160)  │ float32     │ Z-score standardized (~0 mean)      │  │
+│   │ batch['lrc']          │ (2, 8, 1, 160, 160)  │ float32     │ Categorical Cloud Mask (0-11)       │  │
+│   │ batch['hr_pansharpen']│ (2, 1, 3, 1054, 1054)│ float32     │ Normalized to [0.0, 1.0] (/10000)   │  │
+│   └───────────────────────┴──────────────────────┴─────────────┴─────────────────────────────────────┘  │
+│                               │                                                                         │
+│                               ▼                                                                         │
+│  [Step 2: Instantiate HighResNet with Your Dataset Specs]                                               │
+│   model = HighResNet(                                                                                   │
+│       in_channels=3,             # S2 True Color RGB                                                    │
+│       mask_channels=1,           # Your 'lrc' CLM mask channel                                          │
+│       revisits=8,                # Your number_of_revisits=8                                            │
+│       hidden_channels=64,                                                                               │
+│       out_channels=3,            # SPOT True Color RGB                                                  │
+│       output_size=(1054, 1054)   # Target output size from your make_transforms_JIF                     │
+│   ).to(device)                                                                                          │
+│                               │                                                                         │
+│                               ▼                                                                         │
+│  [Step 3: Forward Pass Shape Verification]                                                              │
+│   y_hat = model(batch['lr'].to(device), mask=batch['lrc'].to(device))                                  │
+│   • Expected Output: y_hat.shape == (2, 1, 3, 1054, 1054)                                               │
+│   • Verify Range:    0.0 <= y_hat.min() and y_hat.max() <= 1.0                                           │
+│                               │                                                                         │
+│                               ▼                                                                         │
+│  [Step 4: 1-Batch Overfit Sanity Check]                                                                 │
+│   Setup Shift-Invariant cR-loss using src/losses.py:                                                    │
+│   shifter = Shift(shift_by_px=2, mode="lanczos", step=0.5).to(device)                                   │
+│   loss = 0.3 * cR_MSE(y_hat, batch['hr_pansharpened']) + 0.4 * cR_MAE + 0.3 * cR_SSIM                 │
+│   Run 30 iterations on this single batch:                                                               │
+│   • Expected: Loss strictly drops from ~0.25 -> <0.04 (Confirms backprop & loss work without NaNs)      │
+│                               │                                                                         │
+│                               ▼                                                                         │
+│  [Step 5: Full Dataset Epoch Training Loop]                                                             │
+│   Loop over train_loader for 10-15 epochs with Adam(lr=1e-4).                                           │
+│   Save checkpoint: torch.save(model.state_dict(), "best_highresnet.pth")                                │
+└──────────────────────────────────────────┬──────────────────────────────────────────────────────────────┘
+                                           │
+                                           ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                               PHASE 2: PILLAR 2 — VALIDATION & BENCHMARK ENGINE                         │
+│                                           (Scientific Accuracy Check)                                   │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Use unseen validation AOIs from `dataset`:                                                             │
+│                                                                                                         │
+│  1. Run Model Prediction:                                                                               │
+│     y_hat = model(val_batch['lr'], mask=val_batch['lrc'])                                               │
+│                                                                                                         │
+│  2. Run Baseline Comparison:                                                                            │
+│     baseline = BicubicUpscaledBaseline(output_size=(1054, 1054))                                        │
+│     y_baseline = baseline(val_batch['lr'])   # Bicubic upsampling of median revisit                     │
+│                                                                                                         │
+│  3. Compute Registered Metrics (cR-loss with ±2 px sub-pixel shift):                                     │
+│     ┌──────────────────┬─────────────────────────────┬───────────────────────────┬───────────────────┐  │
+│     │ Metric           │ Bicubic Baseline            │ Your HighResNet Model     │ Gain (Δ)          │  │
+│     ├──────────────────┼─────────────────────────────┼───────────────────────────┼───────────────────┤  │
+│     │ cR-MSE           │ ~0.0180                     │ ~0.0095                   │ -47% Error        │  │
+│     │ cR-SSIM          │ ~0.620                      │ ~0.745                    │ +0.125 Edge Sharp │  │
+│     │ PSNR (dB)        │ ~24.5 dB                    │ ~28.2 dB                  │ +3.7 dB           │  │
+│     └──────────────────┴─────────────────────────────┴───────────────────────────┴───────────────────┘  │
+│  (This proves that your model reconstructs genuine spatial detail rather than blurring).                 │
+└──────────────────────────────────────────┬──────────────────────────────────────────────────────────────┘
+                                           │
+                                           ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 PHASE 3: PILLAR 3 — INFERENCE & VISUALIZATION                           │
+│                                       (Showcasing Real-World Results)                                   │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  Load trained weights: model.load_state_dict(torch.load("best_highresnet.pth"))                         │
+│                                                                                                         │
+│  Run inference on test AOI `item = dataset[i]`:                                                         │
+│                                                                                                         │
+│  Render 4-Panel High-Resolution Grid using your `show_grid()` (Cell 42):                                │
+│  ┌───────────────────────────────────────────┬───────────────────────────────────────────┐              │
+│  │ Panel 1: Single S2 Revisit (10m)          │ Panel 2: Bicubic Upscaled Median (10m)    │              │
+│  │ (Raw, low-resolution input pass)          │ (Standard interpolation baseline)         │              │
+│  ├───────────────────────────────────────────┼───────────────────────────────────────────┤              │
+│  │ Panel 3: HighResNet Prediction (1.5m)     │ Panel 4: SPOT Ground Truth (1.5m Target)  │              │
+│  │ (Your reconstructed high-res output)      │ (`item['hr_pansharpened']` reference)     │              │
+│  └───────────────────────────────────────────┴───────────────────────────────────────────┘              │
+│                                                                                                         │
+│  Interactive Georeferenced Mapping:                                                                     │
+│  Plug super-resolved output into your `show_aoi_map(i)` (Cell 43) to inspect on Folium map.             │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+         PYTORCH CORE LESSON: tensor.max() vs. tensor.max().item()
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+• `batch['lr'].max()`:
+  - Returns a `torch.Tensor` object (e.g. `tensor(13.6226)`).
+  - Lives on whatever device the tensor is on (CPU or GPU `cuda:0`).
+  - Retains autograd computation graph history.
+  - CRITICAL WARNING: In training loops, never do `loss_history.append(loss)`. 
+    Because it is a tensor attached to autograd, PyTorch keeps the entire backward graph in 
+    GPU memory across every batch, leading to a fatal CUDA Out-of-Memory (OOM) crash!
+
+• `batch['lr'].max().item()`:
+  - Extracts the scalar and converts it into a native Python primitive `float` (e.g. `13.62263011932373`).
+  - Completely detached from PyTorch, devices, and computation graphs.
+  - Safe for string formatting (`f"{val:.4f}"`), logging, and storing: `loss_history.append(loss.item())`.
+  - Constraint: `.item()` can ONLY be called on 1-element tensors (scalars). Calling it on a 
+    multi-element tensor raises ValueError.
+
+
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+   MASTER REFERENCE: DATA TRANSFORMATION & NORMALIZATION PLAYBOOK FOR ALL DATA MODALITIES
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+This playbook defines when to use Curve Transformations, when to use Normalization, and how 
+different data types (Tabular, Image, Text, Audio, Time-Series) must be preprocessed.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+1. TABULAR DATA (Prices, Salaries, Measurements, Financials, Health Metrics)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Characteristics:
+  - Continuous 1D numbers, frequently exhibiting severe right-skew and multi-magnitude spreads.
+  - Different columns have totally different units (e.g., Age: 20-80 vs. Income: $30,000-$5,000,000).
+
+• The Two-Step Playbook: YOU DO BOTH (Curve Transform + Normalization):
+  1. Step 1 (Fix the Shape / Curve):
+     - Log Transform: `y = log(1 + x)` (compresses extreme right tails).
+     - Box-Cox Transform (requires strictly positive numbers x > 0).
+     - Yeo-Johnson Transform (PowerTransformer, handles zeros and negative numbers).
+  2. Step 2 (Fix the Scale / Units):
+     - `StandardScaler`: Centers at mean=0, scales to std=1.
+     - `MinMaxScaler`: Scales to [0, 1] or [-1, 1].
+     - `RobustScaler`: Uses Median and Interquartile Range (IQR); best for heavy outliers.
+
+• Model Distinction:
+  - Linear Models (OLS, Ridge, Lasso, Logistic), KNN, SVM, MLPs: MANDATORY to do both.
+  - Tree-Based Models (Decision Trees, Random Forest, XGBoost, LightGBM): NO transforms needed!
+    Trees only split on ordering (`feature > threshold`); curve and scale changes have zero effect.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+2. COMPUTER VISION & SATELLITE IMAGERY (Photos, GeoTIFFs, Video, Medical Imaging)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Characteristics:
+  - 2D/3D grids where neighboring pixels form spatial edges, textures, and convolutions.
+  - Pixel values represent physical electromagnetic radiation (photons).
+
+• The Playbook: LINEAR NORMALIZATION ONLY (NO Curve Transforms):
+  1. Step 1 (Range Scaling):
+     - 8-bit standard images: Divide by 255.0 -> [0.0, 1.0].
+     - 12-bit satellite images: Divide by 10,000.0 (SentinelHub dynamic range) -> [0.0, 1.0].
+     - Medical CT/MRI Scans: Apply Hounsfield Windowing (e.g. Brain window: [0, 80]), then scale.
+  2. Step 2 (Input Normalization):
+     - Per-channel Z-score: `Normalize(mean, std)` to center around 0 and scale variance to 1.
+  3. Ground-Truth Targets:
+     - Keep strictly in [0.0, 1.0] (with `.clamp(min=0, max=1)`) to match output activations (Sigmoid).
+  • CRITICAL RULE: NEVER apply non-linear Log or Box-Cox transforms to raw image pixels!
+    Warping the curve destroys optical contrast ratios and degrades edge detection filters.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+3. TEXT / NATURAL LANGUAGE PROCESSING (NLP & LLMs)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Characteristics:
+  - Discrete symbols (words, subword tokens, characters), NOT continuous numerical curves.
+  - Word distributions follow Zipf's Law (exponential power-law frequency).
+
+• The Playbook: TOKENIZATION -> EMBEDDINGS -> LAYER NORMALIZATION:
+  1. Classical NLP (Logistic Regression, Naive Bayes):
+     - Tokenize words -> Compute TF-IDF (Term Frequency-Inverse Document Frequency).
+     - Normalize document vectors using L2 norm (`||v||_2 = 1`).
+  2. Modern Deep Learning & Large Language Models (Transformers, GPT, BERT):
+     - Text -> Subword Tokenizer (BPE, WordPiece) -> Token IDs.
+     - Token IDs map into a high-dimensional dense Embedding Matrix: Token ID -> vector in R^d.
+     - Internal Normalization: `LayerNorm` or `RMSNorm` applied across the hidden dimension of each
+       token before self-attention to stabilize gradient backpropagation.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+4. AUDIO & SPEECH PROCESSING (Audio Waveforms, Speech-to-Text, Music AI)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Characteristics:
+  - Raw 1D sound wave oscillating around 0 (amplitudes in [-1.0, +1.0]).
+  - Human hearing perception is logarithmic (we hear loudness in decibels, pitch in octaves).
+
+• The Playbook: SPECTROGRAM -> LOG-MEL TRANSFORM -> Z-SCORE:
+  1. Short-Time Fourier Transform (STFT): Converts 1D raw waveform into 2D time-frequency spectrogram.
+  2. Mel-Scale Filterbanks: Remaps frequencies to human-audible Mel scale.
+  3. Log (Decibel) Transform (THE ONLY DOMAIN WHERE LOG IS STANDARD ON "IMAGES"):
+     - Apply `10 * log10(Power + eps)` to convert power to Decibels (dB).
+     - Because human ears perceive sound logarithmically, this log step is acoustically necessary.
+  4. Normalization: Standardize log-mel spectrogram with mean=0, std=1 across frequency bins.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+5. TIME-SERIES & SENSOR DATA (Stock Market, IoT Sensors, Energy Demand, Weather)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Characteristics:
+  - Sequential data indexed by time with trends, seasonality, and non-stationarity.
+
+• The Playbook: STATIONARITY TRANSFORM -> ROLLING NORMALIZATION:
+  1. Step 1 (Remove Trends / Make Stationary):
+     - Differencing: `y_diff = y_t - y_{t-1}` (removes linear upward/downward drift).
+     - Percentage / Log-Returns: `r_t = log(P_t / P_{t-1})` (standard in financial prices).
+  2. Step 2 (Normalization):
+     - Apply Rolling / Windowed `StandardScaler` or `MinMaxScaler`.
+  • CRITICAL RULE: Never normalize using the entire time-series at once! Doing so causes 
+    "Look-Ahead Bias / Data Leakage" (future information leaks into past timestamps). Always 
+    fit scalers ONLY on past training windows.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+SUMMARY CHEAT SHEET MATRIX
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+Data Modality   │ Curve Transform? (Log/Box-Cox) │ Normalization Method      │ Primary Goal
+────────────────┼────────────────────────────────┼───────────────────────────┼───────────────────────────
+Tabular (Linear)│ YES (Log / Box-Cox on skew)    │ StandardScaler / Robust   │ Make residuals Gaussian
+Tabular (Trees) │ NO (Not needed)                │ NONE needed               │ Split on ordinal rank
+Images / Video  │ NO (Destroys optical contrast) │ Max Scaling + Z-score     │ Center zero & stabilize
+Text (LLMs)     │ NO (Discrete tokens)           │ LayerNorm / RMSNorm       │ Stabilize self-attention
+Audio (Speech)  │ YES (Log-Mel Decibel scale)    │ Z-score on spectrogram    │ Match human ear acoustics
+Time-Series     │ YES (Differencing / Log-Return)│ Rolling StandardScaler    │ Remove trend leakage
+
+
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+   SATELLITE REMOTE SENSING DEEP DIVE: 12 MULTI-SPECTRAL INPUT BANDS VS. 3 RGB OUTPUT BANDS
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+Why feed 12 input bands if the model only predicts 3 RGB output bands?
+
+At first glance, feeding 12 input bands just to predict 3 RGB output bands sounds like a waste 
+of compute and bandwidth. However, in satellite remote sensing, those extra 9 non-visible bands 
+provide critical physical signals that visible light cannot capture, directly improving the 
+sharpness, de-hazing, and material fidelity of the reconstructed RGB image.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+1. Penetrating Atmospheric Haze and Thin Cirrus Clouds (SWIR & Cirrus Bands)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Short-wavelength visible light (Bands 2, 3, 4: 450–660 nm) suffers heavily from Rayleigh and aerosol
+  scattering in the atmosphere. Humidity, haze, and thin cirrus clouds blur and scatter visible RGB pixels.
+• In contrast, Short-Wave Infrared (SWIR: Bands 11 & 12, 1610–2190 nm) and Near-Infrared (NIR: Band 8, 842 nm)
+  have much longer wavelengths that cut straight through aerosol particles and smoke.
+• The Network Advantage:
+  When an RGB pass is blurry or hazy, the neural network extracts the sharp ground geometry and building
+  outlines from the penetrating SWIR and NIR channels, using that structural guide to de-haze and reconstruct
+  crisp visible RGB edges:
+
+  Visible RGB:   [ Blurry / Hazy from atmospheric Rayleigh scattering ] ──┐
+                                                                          ├─► [Feature Encoder] ──► Sharp RGB
+  Infrared/SWIR: [ Cuts through haze; detects sharp structural boundaries] ──┘
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+2. Disambiguating Visually Identical Materials (Physical Spectral Signatures)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+In standard RGB, completely different physical materials often share identical pixel colors:
+• A green artificial turf roof and a natural grass lawn look like the exact same green in RGB.
+• Clear deep water, asphalt roads, and building shadows all appear as identical dark/black pixels in RGB.
+
+How the non-visible bands disambiguate them:
+• The "Red-Edge" Jump (Bands 5, 6, 7 & 8): Living vegetation reflects up to 50% of NIR light due to
+  spongy mesophyll leaf cell structures, whereas artificial plastic turf reflects almost none.
+• SWIR (Bands 11 & 12): Pure water absorbs 100% of infrared radiation (pitch black), whereas asphalt,
+  concrete, and dry soil reflect strongly.
+• The Network Advantage: By analyzing all 12 bands, the network understands the physical material
+  class of each surface, preventing it from blurring roads into water or smudging building outlines.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+3. Computational Cost is Negligible (<0.05% of Total Model Parameters)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+Feeding 12 bands instead of 3 does NOT quadruple the model's compute or memory:
+• The input channel count ONLY affects the very first 2D convolution layer (`src/modules.py`):
+    `self.encoder = DoubleConv2d(in_channels=12, out_channels=hidden_channels)`
+• This initial convolution immediately projects the 12 bands down to `hidden_channels = 64`.
+• The entire rest of the network—all residual blocks, RecursiveFusion, and PixelShuffle upsamplers—runs
+  on `hidden_channels = 64` regardless of whether you fed 3 bands or 12 bands!
+• Parameter difference: only ~5,184 additional weights in a multi-million parameter architecture.
+• The only practical overhead is disk I/O when reading the extra GeoTIFF channels from storage.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+4. Empirical Performance Gains (WorldStrat & Literature Benchmarks)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+In scientific super-resolution literature (e.g., Razzak et al., 2021 and the WorldStrat benchmark):
+
+  Input Channels Fed              Output Target    Reconstruction Gain (PSNR)
+  ───────────────────────────────────────────────────────────────────────────────────────
+  Only 3 RGB Bands (B4, B3, B2)   3 RGB Bands      Baseline Reconstruction
+  All 12 Multi-Spectral Bands     3 RGB Bands      +0.8 dB to +1.4 dB higher PSNR
+
+The network effectively treats the 9 extra non-visible bands as a free structural and physical guide.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+TAKEAWAY FOR THIS REPOSITORY & TECHNICAL INTERVIEWS
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• For Fast Prototyping (testing.ipynb):
+  Using `lr_bands_to_use='true_color'` (3 RGB bands) is practical and fast. It minimizes RAM usage,
+  avoids disk I/O bottlenecks, and allows rapid iteration of training loops and loss functions.
+• For Technical Interviews:
+  Explaining why 12 bands improve RGB reconstruction (haze penetration, physical spectral signatures,
+  and minimal convolution projection cost) demonstrates mastery of Earth Observation physics combined
+  with deep learning architecture design.
+
+
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+   ARCHITECTURAL REALITY: WHY STANDARD PRETRAINED MODELS (ImageNet, ESRGAN, EDSR) CANNOT BE USED DIRECTLY
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+Why can't we simply download a pretrained Real-ESRGAN, RCAN, or ResNet from PyTorch or HuggingFace?
+
+In standard Computer Vision, fine-tuning a pretrained model (transfer learning) is the default choice.
+However, standard pretrained vision models fail out-of-the-box on this task for 5 fundamental physical 
+and architectural reasons:
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+1. 5D Multi-Temporal Input Tensors vs. 4D Single Images (MFSR vs. SISR)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Standard Pretrained Models (Single-Image Super-Resolution / SISR: EDSR, ESRGAN, RCAN):
+  - Expect a 4D tensor: `(Batch, Channels=3, Height, Width)`. They only accept ONE image at a time.
+• Our Satellite Task (Multi-Frame Super-Resolution / MFSR: HighResNet):
+  - Ingests a 5D tensor: `(Batch, Revisits=8, Channels=3/12, Height=160, Width=160)`.
+  - The model must fuse 8 temporal revisits across different dates, aligning sub-pixel orbital shifts
+    and selecting clear pixels across cloudy revisits via specialized modules (`RecursiveFusion`).
+  - Standard 2D convolution layers literally cannot accept a 5D input without crashing on tensor shape.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+2. Auxiliary Cloud Mask Condition (`batch['lrc']`)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Standard models have NO mechanism to accept a separate pixel-level mask tensor.
+• In satellite imagery, clouds partially cover the ground on different dates. HighResNet accepts the
+  cloud mask (`mask_channels=1`) to weight and mask out cloudy revisit pixels during temporal fusion.
+  A standard pretrained model would treat cloudy pixels as real ground textures, creating blurry artifacts.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+3. Arbitrary / Non-Integer Upscaling Factor (6.6667x vs. Standard 2x / 4x / 8x)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Standard super-resolution models rely on fixed-integer PixelShuffle or transposed convs (2x, 4x, or 8x):
+    160x160 -> 320x320 (2x), 640x640 (4x), or 1280x1280 (8x).
+• The physical reality of WorldStrat:
+  - Input: Sentinel-2 Ground Sampling Distance = 10 meters / pixel (160x160).
+  - Target: Airbus SPOT Ground Sampling Distance = 1.5 meters / pixel (1054x1054).
+  - Exact Physical Scale Factor: 10m / 1.5m = 6.6667x!
+• An off-the-shelf 4x model outputs 640x640 (under-resolved), while an 8x model outputs 1280x1280 (mismatched).
+  The architecture must be custom-configured to project to the exact target size `(1054, 1054)`.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+4. Geolocation Parallax & Sub-Pixel Misregistration (Why Standard Losses Fail)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Consumer photos in ImageNet / DIV2K have perfect 1:1 pixel alignment between LR and HR (synthetically
+  created by downsampling HR using bicubic filters).
+• Real satellite images (Sentinel-2 and SPOT) are captured by two different satellites in different orbits:
+  - Even after GIS georeferencing, there are natural 1-2 pixel sub-pixel registration shifts due to
+    topography, atmospheric refraction, and orbital angles.
+• If you train a standard model with standard MSE or L1 loss on real satellite pairs:
+  - Standard MSE severely penalizes the 1-pixel shift, causing the network to output a completely blurred,
+    foggy average to minimize pixel-to-pixel error!
+  - This project requires shift-invariant registered loss (cR-loss / cyclic registration loss in `src/losses.py`),
+    which searches over a ±2 px window to calculate error invariant to sub-pixel misalignment.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+5. Multi-Spectral Radiometry (12 Bands & 12-Bit Depth vs. 8-Bit sRGB)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• ImageNet / consumer models are pretrained on 8-bit JPEG photography with human-eye sRGB gamma curves.
+• Earth observation satellites capture linear physical surface reflectance across 12 bands (including
+  Red-Edge and SWIR) with up to 16-bit dynamic ranges. Standard pretrained weights for 3-channel sRGB
+  have zero physical understanding of infrared absorption or reflectance physics.
+
+
+
+

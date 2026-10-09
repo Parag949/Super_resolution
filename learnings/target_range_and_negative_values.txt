@@ -142,3 +142,53 @@ D. Loss Functions & Evaluation Metrics (PSNR & SSIM):
    of 100.0, MSE will be artificially massive and PSNR will plummet to useless 
    negative numbers.
 
+
+6. Skewed Data: When Do We Transform It (Tabular ML) vs. Keep It (Computer Vision/DL)?
+----------------------------------------------------------------------------------------
+Question:
+"If data is skewed, don't we use special transformations (like Log or Box-Cox)?
+Does ML and DL work on skewed data, or am I merging different concepts?"
+
+Answer:
+You are NOT mistaken! You correctly remembered a very real, important ML concept.
+However, it applies to TABULAR DATA, not COMPUTER VISION / DEEP LEARNING.
+
+Here is the exact distinction:
+
+A. Where Skew Transformations ARE Used (Tabular ML / Linear Models):
+   * Algorithms: Linear Regression, Ridge, Lasso, Logistic Regression, PCA.
+   * Typical Data: Income, House Prices, Website Traffic, Insurance Claims.
+   * Why:
+     - Linear regression assumes normally distributed residuals and homoscedasticity.
+     - A single $10,000,000 mansion in a dataset of $200,000 houses exerts massive 
+       leverage, pulling the regression line off course.
+     - Solution: We apply Log-Transform: y_new = log(1 + y), or Box-Cox, to compress 
+       the long tail and make the distribution bell-shaped.
+
+B. Where Skew Transformations ARE NOT Used:
+   1. Tree-Based Models (Random Forest, XGBoost, LightGBM):
+      - Trees only split on ordering ("if income > $50,000").
+      - Whether income is $50,000 or log($50,000), the split position is identical.
+      - Skew has zero effect on tree models.
+
+   2. Computer Vision & Deep Learning (Pixels, Images, Super-Resolution):
+      - Why we DO NOT apply Log or Box-Cox to images:
+        a. Optical Physics & Contrast:
+           Pixel values represent physical photons. If a building reflects 2x more 
+           sunlight than grass, convolutional kernels use that exact 2x contrast 
+           gradient to detect the building's edge. Applying a non-linear log or 
+           Box-Cox warps contrast ratios and destroys sharp edges.
+        b. Deep Networks are Universal Approximators:
+           CNNs and Transformers have millions of parameters and non-linear layers 
+           (ReLU, GELU). They do not assume Gaussian inputs; they learn their own 
+           internal feature representations across 50+ layers.
+        c. Outliers Are Handled by Masks & Losses:
+           Extreme cloud spikes are handled using the Cloud Mask (batch['lrc']) and 
+           robust losses (L1 Loss / cR-loss) rather than warping the input image.
+
+Summary Rule of Thumb:
+* Tabular ML with Linear Regression / Financial data -> Apply Log / Box-Cox.
+* Tree-based ML (XGBoost / Random Forest)           -> No transformation needed.
+* Computer Vision / Deep Learning (CNNs, Tensors)   -> Z-score or [0, 1] scaling only.
+
+
