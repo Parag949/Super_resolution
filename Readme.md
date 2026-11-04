@@ -3,9 +3,6 @@
 
 ## Deep Learning Based Super Resolution Mapping (SRM) from Medium Resolution Satellite Imageries
 
-
---- 
-"Built an end-to-end Multi-Frame Multi-Band (MFMB) super-resolution pipeline fusing 16 Sentinel-2 temporal revisits ($10\,\text{m}$) to reconstruct $1.5\,\text{m}$ high-resolution imagery aligned with Airbus SPOT benchmarks.""Addressed cross-sensor radiometric and spectral discrepancies between Sentinel-2 and SPOT-6/7 sensors by implementing [mention your architecture, e.g., HighRes-net / RCAN / Attention-based fusion].""Mitigated sub-pixel satellite jitter and temporal artifacts (cloud/shadow drift) using spatiotemporal feature aggregation and evaluated performance via cPSNR and SSIM."
 ---
 
 ### 1. Executive Summary
