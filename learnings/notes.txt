@@ -1007,3 +1007,92 @@ If Bicubic interpolation is mathematically a 2D spatial algorithm (Height x Widt
 • How 4D Execution Works:
   The 2D bicubic formula executes strictly on `(H, W)`. Channels (`C`) and Batches (`N`) are never 
   mixed; each color channel of each scene is upscaled independently and in parallel on GPU threads.
+
+
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+   HIGHRESNET REVERSE-ENGINEERING: DEEP-DIVE INTO THE 4 CORE BUILDING BLOCKS
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+This technical breakdown reverse-engineers the official WorldStrat implementation (src/modules.py),
+explaining exactly how each layer functions mathematically, structurally, and radiometrically.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+1. Block A: DoubleConv2d & ResidualBlock (Feature Extraction)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• What it does:
+  - Two consecutive 3x3 2D convolutions with Parametric ReLU (PReLU) activations and Dropout(p=0.5).
+  - Layer sequence: Conv2d(3x3) -> (BatchNorm optional) -> PReLU -> Dropout(0.5) 
+                 -> Conv2d(3x3) -> (BatchNorm optional) -> PReLU -> Dropout(0.5).
+
+• Reflection Padding (`padding_mode="reflect"`):
+  - In satellite imagery, standard zero-padding inserts dark zeros around the edges of the image.
+  - As convolutions slide near borders, zero-padding creates an artificial dark vignette border.
+  - Reflection padding mirrors actual ground pixels across the boundary, preventing edge artifacts.
+
+• Skip Connection (`ResidualBlock`):
+  - Implements ResNet-style identity addition to preserve low-level spatial detail and prevent 
+    vanishing gradients during deep backpropagation:
+      x_out = x + DoubleConv2d(x)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+2. Block B: OneHot & mask_encoder (Handling Atmospheric Noise & Cloud Masks)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• The Cloud Mask Problem:
+  - Sentinel-2 cloud masks (CLM) are categorical classification labels with integer values 0 to 11
+    (e.g., 0=No Data, 1=Saturated/Defective, 2=Dark Area, 3=Cloud Shadow, 4=Vegetation, ..., 
+     8=Medium Cloud, 9=High Cloud, 10=Cirrus, 11=Snow/Ice).
+  - Feeding raw integers (like 8 or 11) directly into a convolution is mathematically wrong because
+    convolutions multiply by weights, implying an artificial ordinal scale (e.g. 8 < 11).
+
+• The Encoding Pipeline:
+  1. `OneHot(num_classes=12)`: Converts discrete integer labels (..., 1, H, W) into 12 binary channels:
+     `(..., 12, H, W)` where each pixel has a 1.0 in its class index and 0.0 elsewhere.
+  2. `DoubleConv2d(in_channels=12, out_channels=1)`: Projects the 12 categorical channels into a 
+     single learned continuous representation of atmospheric interference.
+  3. `nn.Sigmoid()`: Squashes the mask representation into [0.0, 1.0].
+  4. Concatenation: Appended along the channel axis to the image feature maps:
+     `(hidden_channels + 1)`.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+3. Block C: FusionBlock & RecursiveFusion (The "Secret Sauce" - Tournament Bracket)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Why Not Flat Temporal Concatenation (SRCNN)?
+  - In SRCNN, all 8 revisits are concatenated into a flat channel stack: (8 * C).
+  - The WorldStrat paper proved this is brittle: it forces early layers to memorize temporal order
+    and breaks if the number of revisits changes or if dates are shuffled.
+
+• The Tournament Bracket Fusion Mechanism (8 -> 4 -> 2 -> 1):
+  Instead of merging everything at once, HighResNet uses hierarchical pairwise fusion:
+  - `split(x)`: Divides the revisits into two equal halves along the time axis:
+    * `first_half`  = x[:, : revisits//2]   (e.g., Revisits 0, 1, 2, 3)
+    * `second_half` = x[:, revisits//2 :]   (e.g., Revisits 4, 5, 6, 7)
+  - `torch.cat([first_half, second_half], dim=channels)`:
+    * Pairs corresponding revisits together along the channel axis (2 * in_channels).
+  - `self.fuse(x)`:
+    * Passes the paired channels through `ResidualBlock` + `Conv2d` to condense (2 * in_channels)
+      back down to `in_channels`.
+  - Hierarchical Reduction:
+    * Round 1 (Quarterfinals): 8 revisits -> 4 fused revisits
+    * Round 2 (Semifinals):   4 revisits -> 2 fused revisits
+    * Round 3 (Finals):       2 revisits -> 1 master synthesized feature map!
+    Total fusion layers required = log2(revisits) = log2(8) = 3 layers.
+  - Weight Sharing Note: The exact same `FusionBlock` instance is reused across all levels of the tree,
+    enforcing recursive self-similarity and dramatically reducing total parameter count.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+4. Block D: PixelShuffleBlock (Sub-Pixel Convolutional Upsampling)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Why PixelShuffle instead of Standard Interpolation?
+  - Heuristic interpolation (bilinear, bicubic) computes pixel values using fixed mathematical distance
+    formulas, which inherently blurs sharp edges (roads, field boundaries, rooftops).
+  - Sub-Pixel Convolution (PixelShuffle) learns convolutional filters that predict high-frequency textures
+    directly in latent feature space.
+
+• Mathematical Transformation:
+  - Expands channel capacity by `r^2` (where `r` is the zoom factor):
+      Channels: (C * r^2, H, W)  ──►  PixelShuffle(r)  ──►  Spatial: (C, H * r, W * r)
+  - Example for 4x Super-Resolution (r=4):
+    * Convolutions expand channels to `C * 16`.
+    * PixelShuffle rearranges each 16-channel depth column into a 4x4 spatial pixel block.
+  - Followed by convolutional refinement blocks with reflection padding and PReLU to polish 
+    reconstructed edges and fine structural details.

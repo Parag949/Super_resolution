@@ -1,0 +1,471 @@
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+   HIGHRESNET ARCHITECTURE & PYTORCH MODEL BUILDING NOTES (KERAS TO PYTORCH)
+═════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+Author: Parag
+Project: Multi-Temporal Satellite Super-Resolution (Sentinel-2 to Airbus SPOT)
+Reference: WorldStrat / HighResNet (src/modules.py)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+1. The Keras-to-PyTorch Mental Model: Why PyTorch Uses Classes for Everything
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• In TensorFlow / Keras:
+  - Models are typically written sequentially or functionally with simple Python functions:
+      model = keras.Sequential([layers.Conv2D(64, 3, padding='same'), layers.PReLU()])
+  - In Keras, plain functions can create layers and Keras automatically tracks weights under the hood.
+
+• In PyTorch:
+  - A plain Python function CANNOT hold learnable weights or save them to GPU / disk.
+  - In PyTorch, ANY block of code that contains learnable parameters (Conv2d, BatchNorm, Linear)
+    MUST be defined as a Python class inheriting from `nn.Module`.
+  - That is why the WorldStrat authors created separate classes:
+    * `DoubleConv2d`: A reusable block of 2 convolutions.
+    * `ResidualBlock`: `DoubleConv2d` with an identity skip connection (`x + conv(x)`).
+    * `FusionBlock`: Merges 2 revisits into 1.
+    * `RecursiveFusion`: Stacks fusion blocks into a tournament tree.
+    * `PixelShuffleBlock`: Upsamples feature maps into high spatial resolution.
+
+• The Two-Part Anatomy of Every PyTorch Class:
+  Every PyTorch `nn.Module` has exactly two required methods:
+  1. `def __init__(self, ...)`: "The Hardware Store"
+     - Where you declare and instantiate all learnable layers (weights and filters).
+     - Executed ONCE when you create the model object.
+  2. `def forward(self, x)`: "The Conveyor Belt"
+     - Where input tensors actually flow through the layers.
+     - Executed every time you call `model(input_tensor)` (exactly like Keras Functional API).
+
+• Channel Dimension Difference (Crucial!):
+  - TensorFlow / Keras uses NHWC: `(Batch, Height, Width, Channels)`  -> e.g. `(2, 160, 160, 3)`
+  - PyTorch uses NCHW:            `(Batch, Channels, Height, Width)`  -> e.g. `(2, 3, 160, 160)`
+  - This is why PyTorch layers always take `in_channels` and `out_channels` explicitly.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+2. What is `super().__init__()`? (The Ignition Key)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Meaning of "super":
+  - "Child" class: Your class (e.g. `class DoubleConv2d(nn.Module)`)
+  - "Super" / "Parent" class: `nn.Module` (inside the parentheses)
+
+• What `nn.Module` does under the hood:
+  - Manages GPU memory allocation when you call `.to('cuda')`.
+  - Tracks all parameter gradients for `optimizer.step()`.
+  - Handles weight saving and loading via `.state_dict()` and `torch.save()`.
+  - Toggles training/eval modes (`.train()` vs. `.eval()`).
+
+• Why line 1 of `__init__` MUST be `super().__init__()`:
+  - If you omit `super().__init__()`, Python executes your custom code but skips `nn.Module`'s setup.
+  - PyTorch will crash immediately with:
+    `AttributeError: cannot assign module before Module.__init__() call`
+  - In Keras, `keras.Sequential()` ran `super().__init__()` secretly behind the scenes.
+  - In PyTorch, you build the class yourself, so you must explicitly turn the ignition key on line 1.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+3. Why `DoubleConv2d` and `ResidualBlock` Must Be Separate Classes
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• The Fundamental Skip Connection Rule:
+    x_out = x + Conv(x)
+  You can ONLY add two tensors together if they have the exact same shape and channel count.
+
+• The First Layer (Encoder Entry):
+  - Ingests 3 RGB channels (or 4 with cloud mask) and outputs 64 hidden channels.
+  - Input: `(B, 3, 160, 160)` -> Output: `(B, 64, 160, 160)`.
+  - You CANNOT add a 3-channel tensor to a 64-channel tensor (`3 + 64` crashes).
+  - Therefore, this entry layer MUST be a plain `DoubleConv2d` without a skip connection.
+
+• Subsequent Layers (Feature Processing):
+  - Ingests 64 channels and outputs 64 channels (`64 -> 64`).
+  - Here shapes match identically, so you CAN add `x + Conv(x)`.
+  - Therefore, these layers use `ResidualBlock` (which wraps `DoubleConv2d` and adds `+ x`).
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+4. Matrix Mechanics of 2D Convolution: Sliding Windows & 3D Filters
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Basic 2D Sliding Window:
+  - A 3x3 filter slides across an image patch element-by-element:
+    Sum = sum(patch_pixel * weight)
+    Output_Pixel = Sum + Bias
+
+• Multi-Channel 3D Filters (in_channels = 3):
+  - In RGB imagery, a 3x3 filter is NOT a flat 2D square. It is a 3D cube of shape (3, 3, 3):
+    * 3x3 weights for the Red channel
+    * 3x3 weights for the Green channel
+    * 3x3 weights for the Blue channel
+  - The dot products of all 3 channels are summed together + 1 bias to produce ONE output number.
+
+• Producing out_channels = 64:
+  - To get 64 output channels, PyTorch instantiates 64 independent 3D filter cubes (64, 3, 3, 3).
+  - Filter 1 learns road edges, Filter 2 learns vegetation texture, Filter 3 learns building corners...
+  - Result: `(B, 3, 160, 160) * (64, 3, 3, 3) -> (B, 64, 160, 160)`.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+5. Where is the Bias? Is Bias PReLU?
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• No, Bias is NOT PReLU! They are two completely different operations:
+    y = PReLU( (x * W) + b )
+
+• The Bias (b):
+  - Lives directly inside `nn.Conv2d`.
+  - It is a single learnable scalar number added to each output channel's total sum.
+  - Automatically created by PyTorch: `conv.bias` has shape `(out_channels,)`.
+
+• PReLU (Parametric ReLU):
+  - The non-linear activation gatekeeper that runs AFTER the convolution and bias addition.
+  - Standard ReLU zeroes out negative numbers (`if x < 0: 0`), leading to "dead neurons".
+  - PReLU multiplies negative numbers by a small learnable slope `a`:
+      PReLU(z) = z if z > 0 else (a * z)
+  - The network autonomously learns during training what slope `a` works best for satellite textures.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+6. Padding Mechanics: Tracing a 10x10 Matrix with a 3x3 Kernel
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Case A: Without Padding (`padding=0` / "valid"):
+  - A 3x3 kernel needs a center pixel and 1 neighbor in all directions.
+  - Cannot center on top-left pixel (0, 0) because Row -1 and Col -1 do not exist!
+  - First valid center is (Row 1, Col 1) -> produces Output[0, 0].
+  - Slides right until (Row 1, Col 8) -> produces Output[0, 7]. Cannot move to Col 9 (Col 10 doesn't exist).
+  - Result across rows: only 8 positions. Result down cols: only 8 positions.
+  - Output shrinks to: `(10 - 3 + 1) = 8x8`! You permanently lose the outer border.
+
+• Case B: With Same Padding (`padding=1` / `padding="same"`):
+  - Adds a 1-pixel border all around the image.
+  - Matrix becomes: `(10 + 1 + 1) x (10 + 1 + 1) = 12x12`.
+  - Now the kernel CAN center on your original pixel (0, 0) because its neighbors are the padded border.
+  - Hits all 10 positions across, all 10 positions down.
+  - Output size: `(12 - 3 + 1) = 10x10`! Spatial resolution is 100% preserved.
+
+• Reflection Padding (`padding_mode="reflect"`):
+  - In satellite imagery, zero-padding inserts black 0s around the edges, causing dark edge vignetting.
+  - Reflection padding mirrors actual terrain pixels across the border, keeping boundary features natural.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+7. Why Double Convolutions (`DoubleConv2d`)? Why Not 10 in a Row?
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Reason 1: Preventing Vanishing Gradients
+  - In deep networks without skip connections, gradients multiply through weight matrices backwards:
+    `grad = grad * W10 * W9 * ... * W1`.
+  - Multiplying small numbers 10 times causes the gradient to decay to near 0 (`0.5^10 ≈ 0.0009`).
+  - Early layers receive zero feedback and stop learning.
+  - By breaking convolutions into pairs of 2 and adding a skip connection (`x + DoubleConv(x)`),
+    the derivative of `+ x` is 1.0 — a direct gradient superhighway that keeps training stable.
+
+• Reason 2: The Receptive Field Math (2 x 3x3 = 5x5)
+  - First 3x3 conv sees a 3x3 patch.
+  - Second 3x3 conv looks at the first conv's outputs, effectively expanding vision to 5x5!
+  - Parameter Comparison:
+    * One 5x5 Conv:  5 x 5 = 25 weights per channel. (1 activation).
+    * Two 3x3 Convs: (3x3) + (3x3) = 18 weights per channel. (28% fewer parameters! 2 activations!).
+  - 2 convolutions provide the same receptive field with fewer weights and higher non-linear power.
+
+• Reason 3: Satellite VRAM Bottleneck
+  - In multi-temporal super-resolution, we carry 8 revisits.
+  - 10 convolutions per block would cause GPU intermediate activation memory to explode (Out of Memory).
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+8. Why Exactly 64 Channels? Why Not 16, 50, or 256?
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• 1. The Capacity Sweet Spot (Underfitting vs. Overfitting):
+  - 16 Channels: Too narrow vocabulary; cannot represent trees, roads, buildings, water, and soil. Blurs.
+  - 256 Channels: Parameters scale quadratically ($256^2 = 65,536$ vs $64^2 = 4,096$). 16x more compute!
+  - 64 Channels: The sweet spot between rich feature representation and lightweight fast training.
+
+• 2. NVIDIA GPU Hardware Architecture (Warps of 32 Threads):
+  - GPUs process calculations in parallel hardware batches called Warps (groups of 32 threads).
+  - Choosing 64 channels keeps 2 complete 32-thread warps 100% saturated.
+  - A non-power-of-two number like 50 would waste GPU cycles on idle dummy threads.
+
+• 3. The PixelShuffle Mathematical Contract:
+  - Sub-pixel convolution for 4x zoom requires channels to be divisible by $zoom^2 = 4^2 = 16$.
+  - 64 / 16 = 4 clean integer channels.
+  - An arbitrary number like 50 / 16 = 3.125 crashes PyTorch immediately.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+9. Hands-On Dissection Checklist (The 6 Milestones)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Step 1: Feature Extractor (`DoubleConv2d` & `ResidualBlock`)
+  - Input: `(2, 64, 20, 20)` -> Output: `(2, 64, 20, 20)`
+• Step 2: Cloud Mask Conditioner (`OneHot` & Mask Encoder)
+  - Input: `(2, 8, 1, 20, 20)` (int64) -> Output: `(2, 8, 1, 20, 20)` (float in [0, 1])
+• Step 3: The 2-to-1 Frame Merger (`FusionBlock`)
+  - Input: `(2, 8, 64, 20, 20)` -> Output: `(2, 4, 64, 20, 20)` (Revisits cut in half!)
+• Step 4: The Tournament Bracket (`RecursiveFusion`)
+  - Input: `(2, 8, 64, 20, 20)` -> Output: `(2, 64, 20, 20)` (All revisits collapsed to 1 master map!)
+• Step 5: The Sub-Pixel Upsampler (`PixelShuffleBlock`)
+  - Input: `(2, 64, 20, 20)` -> Output: `(2, 3, 80, 80)` (Spatial dimensions expanded 4x!)
+• Step 6: Master Assembler (`HighResNet`)
+  - Input: `sample_batch['lr']` (2, 8, 3, 160, 160) + `sample_batch['lrc']` (2, 8, 1, 160, 160)
+  - Output: `(2, 1, 3, 1054, 1054)` (Matches Airbus SPOT ground truth target shape!)
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+10. Standard Conv2d vs. Depthwise Separable Convolutions: Why 3D Filters?
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• The Question:
+  Why does standard Conv2d use a 3D filter (Channels, 3, 3) that mixes all channels at once?
+  Why not apply a separate 2D filter on each channel independently, and then combine them?
+
+• What Standard Conv2d Does (Spatial + Spectral Mixed Simultaneously):
+  - A 3D filter cube of shape (3, 3, 3) computes the dot product across space (Height x Width) 
+    AND across color channels (Red, Green, Blue) in a single unified operation.
+  - Why this is essential in Satellite Imagery:
+    * Earth materials are identified by cross-spectral ratios (Spectral Signatures):
+      - Vegetation: High Green, Low Red, Low Blue.
+      - Deep Water: High Blue, Low Green, Zero Red.
+      - Soil/Desert: High Red, Medium Green, Low Blue.
+    * A 3D filter asks: "Is this pixel bright in Green at the exact same moment it is dark in Red?"
+    * It detects both the spatial geometric edge and the physical spectral signature simultaneously.
+
+• The Alternative: Depthwise Separable Convolutions (MobileNet Architecture):
+  - What it is:
+    1. Depthwise Conv: Applies an independent 2D filter to each channel separately (Red 2D, Green 2D, Blue 2D).
+    2. Pointwise Conv: Uses a 1x1 convolution across the depth dimension to mix them.
+  - Trade-Off:
+    * Compute Cost: ~8x to 9x fewer floating-point operations (FLOPs). Designed for smartphones and drones.
+    * Representation Capacity: Lower. Learns complex cross-channel spectral interactions much slower.
+    * Image Quality (PSNR): Produces slightly softer edges in super-resolution reconstruction.
+
+• Why HighResNet Uses Standard 3D Conv2d:
+  - In super-resolution, our input patches are modest (160 x 160) running on a desktop/server GPU.
+  - We do not need to compromise reconstruction sharpness to save smartphone battery life.
+  - Standard Conv2d provides the maximum representational power to extract high-frequency satellite 
+    details and razor-sharp boundaries.
+  - (PyTorch Note: PyTorch supports depthwise convolution natively via `nn.Conv2d(..., groups=in_channels)`).
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+11. Golden Rule of PyTorch Architecture: Never Instantiate Layers inside forward()
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• The Mistake (Instantiating Layers inside forward):
+    def forward(self, x):
+        # ⚠️ CRITICAL BUG: Creating layer dynamically inside forward()!
+        block = DoubleConv2d(
+            in_channels=x.shape[1],
+            out_channels=x.shape[1],
+        )
+        return x + block(x)
+
+• Why this Fails Completely in Practice:
+  1. Permanent Random Re-Initialization:
+     - `forward()` is executed on every single batch of data during training.
+     - Placing `DoubleConv2d(...)` inside `forward()` creates a brand-new layer with fresh,
+       randomly initialized weights every forward pass!
+     - Any learning achieved in the previous step is thrown away immediately. The network never learns.
+
+  2. Invisible to the Optimizer:
+     - In PyTorch, optimizers are initialized once before training:
+         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+     - The optimizer inspects layers declared as `self.layer = ...` inside `__init__()`.
+     - Layers created locally inside `forward()` are NOT tracked by `model.parameters()`.
+     - The optimizer does not even know they exist, so their gradients are never updated!
+
+  3. GPU Memory Overhead:
+     - Creating new Python objects and CUDA tensors every iteration causes constant memory allocation,
+       slowing training to a crawl and causing memory fragmentation.
+
+• The Universal PyTorch Rule:
+  - `__init__()`: "The Hardware Store" -> Instantiate layers ONCE so their weights persist across epochs.
+  - `forward()`:  "The Conveyor Belt"  -> Call pre-existing layers (`self.block(x)`) on the tensor.
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+12. DenseBlock vs. ResidualBlock & Python Constructor Inheritance Rules
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Part 1: Matrix Mechanics (ResidualBlock vs. DenseBlock)
+  - ResidualBlock (ResNet Addition: `+`):
+      y = x + self.residualblock(x)
+    * Element-by-element addition: Matching matrix cells are added together.
+    * Channel Count: Unchanged! Input 64 channels -> Output 64 channels.
+    * Mental Model: "Refines" existing features without growing in size.
+
+  - DenseBlock (DenseNet Concatenation: `torch.cat(..., dim=1)`):
+      y = torch.cat([x, self.residualblock(x)], dim=1)
+    * Feature Stacking: Original matrix channels and new feature channels are stacked side-by-side.
+    * Channel Count: DOUBLED! Input 64 channels -> Output 128 channels.
+    * Mental Model: Keeps original features 100% untouched while appending new learned features.
+    * Note on Author's Docstring Bug: The original docstring claims it returns `in_channels`;
+      in reality, it returns `2 * in_channels`!
+
+• Part 2: Python Inheritance: Why DenseBlock Has No `__init__()`
+  Look at the author's code:
+      class DenseBlock(ResidualBlock):
+          def forward(self, x: Tensor) -> Tensor:
+              return torch.cat([x, self.residualblock(x)], dim=1)
+
+  - Scenario A: You WRITE an `def __init__()` in a child class:
+    * Writing `__init__` replaces (overrides) the parent constructor.
+    * Because you replaced it, Python will NOT call the parent setup automatically.
+    * You MUST call `super().__init__()` by hand, or PyTorch crashes!
+        class ResidualBlock(nn.Module):
+            def __init__(self, in_channels):
+                super().__init__()  # MANDATORY!
+
+  - Scenario B: You OMIT `def __init__()` completely (Like `DenseBlock`):
+    * If a child class has no `__init__`, Python automatically falls back to the parent's `__init__()`.
+    * Python automatically executes `ResidualBlock.__init__()`, which ALREADY ran `super().__init__()`
+      and created `self.residualblock = DoubleConv2d(...)`!
+    * That is why `DenseBlock` can immediately use `self.residualblock(x)` in `forward()` without
+      writing a single line of `__init__`!
+
+• The Golden Inheritance Rule:
+  - If you write `__init__()` -> You MUST call `super().__init__()`.
+  - If you omit `__init__()`  -> Python runs the parent's `__init__()` automatically.
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+13. Tensor Dimensional Mechanics: squeeze vs. unsqueeze vs. flatten vs. view
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• At a Glance Comparison Table:
+  ┌──────────────────────┬─────────────────────────────────────────────────┬──────────────────────┬──────────────────────┬────────────────┐
+  │ Function             │ Core Operation                                  │ Example Input Shape  │ Example Output Shape │ Total Elements │
+  ├──────────────────────┼─────────────────────────────────────────────────┼──────────────────────┼──────────────────────┼────────────────┤
+  │ unsqueeze(dim)       │ Injects a new dummy dimension of size 1         │ (2, 64, 160, 160)    │ (2, 1, 64, 160, 160) │ Identical      │
+  │ squeeze(dim)         │ Strips out an existing dummy dimension of size 1│ (2, 1, 64, 160, 160) │ (2, 64, 160, 160)    │ Identical      │
+  │ flatten(start, end)  │ Multiplies adjacent dimensions together         │ (2, 8, 64, 160, 160) │ (16, 64, 160, 160)   │ Identical      │
+  │ view(...)            │ The Universal Master: Re-indexes flat RAM memory│ (2, 8, 64, 160, 160) │ (Any valid shape)    │ Identical      │
+  └──────────────────────┴─────────────────────────────────────────────────┴──────────────────────┴──────────────────────┴────────────────┘
+
+• 1. The True Opposites: squeeze() vs. unsqueeze()
+  - These two functions ONLY touch dimensions of length 1 (dummy dimensions).
+  - `unsqueeze(dim)` (or `x[:, None, ...]`): Adds an axis of size 1 without moving numbers:
+      (2, 64, 160, 160)  ──►  unsqueeze(1)  ──►  (2, 1, 64, 160, 160)
+  - `squeeze(dim)`: Removes an axis of size 1:
+      (2, 1, 64, 160, 160)  ──►  squeeze(1)  ──►  (2, 64, 160, 160)
+  - Safety Rule: If a dimension has size > 1 (e.g. 8 revisits or 64 channels), `squeeze()` refuses
+    to touch it and leaves the tensor unchanged. It strictly drops dimensions of size 1.
+
+• 2. The Steamroller: flatten()
+  - `flatten` does NOT just look for 1s. It combines multiple non-empty dimensions by multiplying them:
+      x = torch.randn(2, 8, 64, 160, 160)
+      out = torch.flatten(x, start_dim=0, end_dim=1)
+      # Shape: (16, 64, 160, 160)  <-- Because 2 * 8 = 16!
+  - Common in classification heads: `x.flatten(start_dim=1)` converts (B, C, H, W) to (B, C*H*W) 
+    before passing into `nn.Linear`.
+
+• 3. The Universal Swiss Army Knife: view() / reshape()
+  - In computer memory (RAM/VRAM), all tensors are stored as a single, contiguous 1D ribbon of bytes.
+  - `view()` does not copy or move any data. It simply changes the metadata indexing rules ("the glasses"):
+    * `x.view(16, 64, 160, 160)`    <-- acts like flatten
+    * `x.view(2, 1, 64, 160, 160)`   <-- acts like unsqueeze
+    * `x_dummy.view(2, 64, 160, 160)`<-- acts like squeeze
+  - The Only Mathematical Constraint: Total elements must remain constant:
+      prod(input_shape) == prod(output_shape)
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+14. Weight Initialization Math & The Weight-Sharing Trick in RecursiveFusion
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Part 1: How PyTorch Initializes Weights (Kaiming He Uniform Initialization)
+  - When `nn.Conv2d` is created, PyTorch draws small random numbers from a uniform distribution:
+      W ~ Uniform(-bound, +bound), where bound = sqrt(6 / ((1 + a^2) * fan_in))
+  - `fan_in` = in_channels * kernel_size * kernel_size (e.g. 128 * 3 * 3 = 1,152).
+  - Weights are initialized around tiny values (+/- 0.05) so gradients neither vanish nor explode.
+
+• Part 2: How the Weight-Sharing Trick Works in Python
+  - Look at the author's code:
+      pairwise_fusion = FusionBlock(in_channels, kernel_size)  # Constructor called ONCE!
+      self.fusion = nn.Sequential(*(pairwise_fusion for _ in range(num_fusion_layers)))
+
+  - What Happens in Memory:
+    * `pairwise_fusion` is a pointer to ONE block of memory (e.g. address 0x7FFF01).
+    * `nn.Sequential` receives 3 references pointing to the EXACT same memory address.
+    * `id(self.fusion[0]) == id(self.fusion[1]) == id(self.fusion[2])` is True!
+
+  - How Forward & Backward Passes Work:
+    * Forward Pass: The tensor passes through the same physical layer 3 times in a loop
+      (Round 1: 8->4, Round 2: 4->2, Round 3: 2->1).
+    * Backward Pass (Gradient Descent): PyTorch automatically accumulates (sums) the gradients
+      from all 3 rounds:
+        G_total = grad_round1 + grad_round2 + grad_round3
+    * The optimizer updates the shared weights once per batch with the combined signal!
+
+• Part 3: Code Comparison — Shared vs. Independent Weights
+  - Shared Weights (Author's 150k parameter version):
+      pairwise = FusionBlock(...)
+      self.fusion = nn.Sequential(*(pairwise for _ in range(3)))  # Same object repeated
+
+  - Independent Weights (450k parameter version - 3 separate layers):
+      self.fusion = nn.Sequential(*(FusionBlock(...) for _ in range(3)))  # New object each iteration!
+      # Or:
+      self.fusion = nn.ModuleList([
+          FusionBlock(...),  # Round 1 custom weights W1 (8 -> 4)
+          FusionBlock(...),  # Round 2 custom weights W2 (4 -> 2)
+          FusionBlock(...),  # Round 3 custom weights W3 (2 -> 1)
+      ])
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+15. Non-ML Everyday Analogy: Object Reference vs. Multiple Instances (The Piggy Bank)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Scenario A: Shared Object / Pointer (What HighResNet's RecursiveFusion Does)
+    class PiggyBank:
+        def __init__(self):
+            self.money = 0
+
+    # 1. Buy ONE physical piggy bank:
+    my_bank = PiggyBank()
+
+    # 2. Put that SAME bank into 3 rooms:
+    rooms = [my_bank for _ in range(3)]
+
+    # Drop $10 into the Kitchen bank (rooms[2]):
+    rooms[2].money += 10
+
+    # Check the Living Room (rooms[0]):
+    print(rooms[0].money)  # Output: 10!
+  - Explanation: You did not buy 3 banks. You bought ONE bank box, and all 3 rooms hold a pointer
+    to that exact same physical box on the table.
+  - This is Weight Sharing! When Round 3 updates weights, Round 1 and Round 2 share that exact update.
+
+• Scenario B: Independent Objects (Creating a New Instance in Each Loop)
+    # Buy a BRAND NEW piggy bank for each room:
+    rooms = [PiggyBank() for _ in range(3)]
+
+    # Drop $10 into the Kitchen bank (rooms[2]):
+    rooms[2].money += 10
+
+    # Check the Living Room (rooms[0]):
+    print(rooms[0].money)  # Output: 0!
+  - Explanation: Three completely separate boxes in memory. Changing one has zero effect on the others.
+
+• Summary Rule:
+  - `obj = Class()` then `[obj for _ in range(3)]`: 1 box in memory, 3 pointers. (Shared Weights)
+  - `[Class() for _ in range(3)]`:                  3 completely separate boxes.  (Independent Weights)
+
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+16. Python Syntax Nuance: Blueprint vs. House & The Power of Parentheses `()`
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+• The Question / Misconception:
+  "Doesn't a variable hold a function/class, so calling it in a loop creates multiple instances?"
+
+• The Rule of Parentheses in Python:
+  - Without `()`: You are referencing the Blueprint (the class definition / function itself).
+  - With `()`:    You execute the constructor, building a physical House (an instantiated object in memory).
+
+• Case 1: What You Might Imagine (Building 3 Houses):
+    # Storing the Blueprint (no parentheses):
+    maker = FusionBlock
+
+    # Calling maker(...) with parentheses INSIDE the loop:
+    # Executes the constructor 3 times -> 3 separate houses built in memory!
+    layers = [maker(in_channels, kernel_size) for _ in range(3)]
+
+• Case 2: What the Author Actually Wrote (Building 1 House):
+    # 1. Constructor runs ONCE right here (parentheses are executed before the loop):
+    pairwise_fusion = FusionBlock(in_channels, kernel_size)
+
+    # 2. Inside the loop, notice: NO PARENTHESES!
+    # It says `pairwise_fusion`, NOT `pairwise_fusion()`!
+    self.fusion = nn.Sequential(*(pairwise_fusion for _ in range(num_fusion_layers)))
+  - Because there are no `()` inside the loop, Python does not call any function.
+  - It simply references the already-built house 3 times!
+
+• Cheat Sheet Summary:
+  ┌─────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────────┐
+  │ Code Pattern                                            │ Result                                                     │
+  ├─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+  │ `house = BuildHouse()`                                  │ Parentheses run ONCE before loop:                          │
+  │ `[house for _ in range(3)]`                             │ 1 House in memory (3 references pointing to it).           │
+  ├─────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+  │ `[BuildHouse() for _ in range(3)]`                      │ Parentheses run INSIDE loop 3 times:                       │
+  │                                                         │ 3 completely separate Houses in memory.                    │
+  └─────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┘
