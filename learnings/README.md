@@ -64,6 +64,14 @@ The complete documentation of this project has been restructured and optimized i
 * **4. Interview Defense Script & Resume Showcase Guide:**
   * Professional resume bullet points for remote sensing AI engineering.
   * How to confidently answer: *"Did you train from scratch or use pretrained weights?"*
+* **5. Why Super-Resolved Imagery Looks Softer Than Native Commercial Ground Truth:**
+  * The $44\times$ Area Expansion Problem ($6.67\times$ scaling: $100\text{ m}^2$ into 44 sub-pixels).
+  * Regression vs. GANs: Why satellite science prioritizes physical honesty over fake hallucination.
+  * Multi-week time-series consensus vs. instantaneous single-day optical shutter snapshots.
+  * The proper benchmark comparison: Panel 1 (10m Input) vs. Panel 3 (HighResNet).
+* **6. Future Technical Roadmap & Planned Extensions:**
+  * Explainable AI (XAI) via Multi-Temporal Spatio-Spectral Local Attribution Maps (LAM).
+  * Hybrid CNN-Transformer architecture with Temporal Cross-Attention.
 
 ---
 

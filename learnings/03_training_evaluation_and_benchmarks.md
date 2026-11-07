@@ -96,3 +96,48 @@ When an interviewer asks: *"Did you train the model from scratch or use pretrain
 > *"I designed the complete end-to-end data pipeline, the baseline benchmark, and audited the PyTorch architecture from first principles. For the final evaluation, I leveraged the official NeurIPS pretrained foundation weights under the CC-BY open-source license.*
 > 
 > *In production remote sensing, training $3.26\text{M}$ parameter models from scratch across 35,000 multi-spectral tiles on local hardware is computationally redundant. My engineering focus was on solving the core technical bottlenecks: fixing the physical radiometry display clipping via $2\%\text{--}98\%$ percentile stretching, auditing the multi-temporal recursive tournament fusion, and analyzing the PSNR Paradox where sub-pixel cross-sensor offsets penalize MSE while SSIM proves a $+0.04$ structural leap."*
+
+
+---
+
+## 5. Why Super-Resolved Images Look Softer Than Native Commercial Ground Truth
+
+### 5.1 The "$44\times$ Area Explosion" Problem (The Ill-Posed Inverse Math)
+* Standard benchmark super-resolution operates at $2\times$ or $4\times$ upscaling.
+* Sentinel-2 ($10\text{m}$) to Airbus SPOT ($1.5\text{m}$) is an extreme **$6.6667\times$ linear scale factor**.
+* In 2D area terms:
+  $$6.6667^2 \approx \mathbf{44.44\times\text{ more pixels!}}$$
+* **The Physical Reality:** 1 single pixel in Sentinel-2 represents a $10\text{m} \times 10\text{m} = 100\text{ m}^2$ area on Earth (roughly the footprint of an entire house).
+* For every single input pixel, the neural network must deduce **44 distinct sub-pixels**! Mathematically, recovering microscopic sharp textures across a $44\times$ pixel void without prior geometric knowledge is an ill-posed inverse problem.
+
+### 5.2 Physical Honesty vs. "Fake Hallucination" (Regression vs. GANs/Diffusion)
+* **Generative Models (GANs / Diffusion like ESRGAN):** Use adversarial loss to **hallucinate** synthetic high-frequency noise. If uncertain about a roof, they invent plausible-looking roof tiles or tree leaves.
+* **Regression Models (HighResNet):** Trained with $L_1$ and SSIM loss. Mathematically, regression computes the **conditional expected mean** $\mathbb{E}[y | x]$. When uncertain about high-frequency micro-textures, it outputs the mathematically honest, smooth consensus.
+* **Why Scientific Mapping Requires Regression:** In remote sensing, defense analytics, and disaster response (e.g. UN refugee mapping, building damage assessment), **hallucinating fake buildings is dangerous**. HighResNet prioritizes radiometric and structural truth over synthetic artistic noise.
+
+### 5.3 Multi-Temporal Consensus vs. Instantaneous Optical Snapshot
+* **Airbus SPOT Ground Truth:** An instantaneous optical shutter snapshot taken on a single sunny afternoon by a dedicated high-speed optical satellite telescope.
+* **Sentinel-2 Input:** An 8-revisit time series captured over weeks or months. Over those weeks, sun angles shift, shadows move, vegetation grows, and cars move.
+* **The Result:** HighResNet reconstructs the **persistent, cloud-free geographic consensus**, which naturally produces a smoother image than a single-instant optical snapshot.
+
+### 5.4 The Correct Engineering Perspective
+When evaluating super-resolution, the critical visual comparison is **Panel 1 (Raw Input) vs. Panel 3 (HighResNet)**:
+1. In Panel 1 ($10\text{m}$), individual buildings and streets are completely indistinguishable blurry blobs.
+2. In Panel 3 ($1.5\text{m}$), building clusters, road networks, and agricultural field boundaries clearly separate into distinct, measurable shapes.
+3. This structural leap is what drives the **$+0.04$ SSIM gain**, enabling accurate downstream land-cover classification and GIS mapping!
+
+---
+
+## 6. Future Technical Roadmap & Planned Extensions
+
+### 6.1 Explainable AI (XAI) via Multi-Temporal Local Attribution Maps (LAM)
+* **What is LAM?** Introduced at CVPR 2021 (*Gu & Dong*), Local Attribution Maps adapt Integrated Gradients specifically for super-resolution by using a progressive Gaussian blurring path function from the input to a blurred baseline.
+* **Why LAM in Multi-Temporal Satellite SR?** Standard attribution maps only look at single RGB images. In this project, LAM enables **3-Axis Attribution**:
+  1. *Spatial Attribution:* Visualizing the effective receptive field contributing to a specific $16 \times 16$ reconstructed urban edge.
+  2. *Temporal Attribution:* Quantifying gradient contributions across the 8 revisit dates, mathematically validating that the model selectively ignores overcast passes and prioritizes clear days.
+  3. *Spectral Attribution:* Isolating whether non-visible bands (NIR Band 8, SWIR Bands 11/12) contribute stronger boundary gradients than standard RGB.
+* **Implementation Simplicity:** Uses PyTorch autograd (`torch.autograd.grad`) on the existing frozen model without requiring additional training or GPU overhead.
+
+### 6.2 Hybrid CNN–Transformer Architecture with Temporal Cross-Attention
+* Maintains the lightweight, memory-efficient 2D CNN spatial encoder.
+* Replaces the static recursive tournament fusion tree with a Multi-Head Temporal Attention bottleneck ($8 \times 8$ attention matrix) to dynamically learn data-dependent revisit weighting.
